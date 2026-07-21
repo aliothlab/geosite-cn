@@ -36,7 +36,7 @@ jobs:
           sudo install "/tmp/sing-box-${VNUM}-linux-amd64/sing-box" /usr/local/bin/sing-box
           sing-box version
 
-      - name: Build JSON rule-sets
+      - name: Build JSON rule-sets and dae .dat files
         run: python3 build.py
 
       - name: Compile SRS binaries
@@ -49,7 +49,8 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add rules/geosite-cn.json rules/geosite-cn.srs rules/geoip-cn.json rules/geoip-cn.srs
+          git add rules/geosite-cn.json rules/geosite-cn.srs rules/geosite-cn.dat \
+                  rules/geoip-cn.json rules/geoip-cn.srs rules/geoip-cn.dat
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else

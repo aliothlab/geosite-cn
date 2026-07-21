@@ -27,6 +27,15 @@ GEOIP_JSON = os.environ.get("GEOIP_JSON", "rules/geoip-cn.json")
 MIN_V4 = int(os.environ.get("MIN_V4", "1000"))
 MIN_V6 = int(os.environ.get("MIN_V6", "100"))
 
+# --- dae (V2Ray-format geoip.dat / geosite.dat, consumed via ext:"file.dat:tag") ---
+# geosite tags are conventionally lower-case (domain-list-community), geoip tags
+# upper-case (v2fly/geoip); dae matches case-insensitively but we mirror the
+# canonical files so any consumer works.
+GEOSITE_DAT = os.environ.get("GEOSITE_DAT", "rules/geosite-cn.dat")
+GEOIP_DAT = os.environ.get("GEOIP_DAT", "rules/geoip-cn.dat")
+GEOSITE_TAG = os.environ.get("GEOSITE_TAG", "cn")
+GEOIP_TAG = os.environ.get("GEOIP_TAG", "CN")
+
 VERSION_CEILING = int(os.environ.get("VERSION_CEILING", "15"))
 FALLBACK_VERSION = int(os.environ.get("FALLBACK_VERSION", "3"))
 
@@ -112,12 +121,76 @@ def write_ruleset(path, ruleset):
         f.write("\n")
 
 
+# --- minimal V2Ray/Xray .dat (protobuf) encoder, no third-party deps ---
+# Schema (v2fly/v2ray-core app/router/routercommon/common.proto):
+#   CIDR        { bytes ip = 1; uint32 prefix = 2; }
+#   GeoIP       { string country_code = 1; repeated CIDR cidr = 2; }
+#   GeoIPList   { repeated GeoIP entry = 1; }              -> geoip.dat
+#   Domain      { Type type = 1; string value = 2; }       Type: RootDomain = 2
+#   GeoSite     { string country_code = 1; repeated Domain domain = 2; }
+#   GeoSiteList { repeated GeoSite entry = 1; }            -> geosite.dat
+# domain_suffix maps to Domain.Type RootDomain (matches the domain and subdomains).
+ROOT_DOMAIN = 2  # Domain.Type.RootDomain
+
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _tag(field, wire):
+    return _varint((field << 3) | wire)
+
+
+def _pb_varint(field, value):
+    return _tag(field, 0) + _varint(value)
+
+
+def _pb_bytes(field, data):
+    return _tag(field, 2) + _varint(len(data)) + data
+
+
+def _pb_string(field, s):
+    return _pb_bytes(field, s.encode("utf-8"))
+
+
+def encode_geosite_dat(tag, domains):
+    site = _pb_string(1, tag)
+    for d in domains:
+        dom = _pb_varint(1, ROOT_DOMAIN) + _pb_string(2, d)
+        site += _pb_bytes(2, dom)
+    return _pb_bytes(1, site)  # GeoSiteList { entry }
+
+
+def encode_geoip_dat(tag, cidrs):
+    geo = _pb_string(1, tag)
+    for ip_bytes, prefix in cidrs:
+        cidr = _pb_bytes(1, ip_bytes) + _pb_varint(2, prefix)
+        geo += _pb_bytes(2, cidr)
+    return _pb_bytes(1, geo)  # GeoIPList { entry }
+
+
+def write_dat(path, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+
+
 def build_geosite(version):
     domains = parse_domains(fetch(GEOSITE_URL))
     if len(domains) < MIN_DOMAINS:
         raise SystemExit(f"only {len(domains)} domains parsed (< {MIN_DOMAINS})")
     write_ruleset(GEOSITE_JSON, {"version": version, "rules": [{"domain_suffix": domains}]})
     print(f"wrote {GEOSITE_JSON}: {len(domains)} domain_suffix (version {version})")
+    write_dat(GEOSITE_DAT, encode_geosite_dat(GEOSITE_TAG, domains))
+    print(f"wrote {GEOSITE_DAT}: {len(domains)} domains (dae, tag '{GEOSITE_TAG}')")
 
 
 def build_geoip(version):
@@ -131,6 +204,9 @@ def build_geoip(version):
     cidrs = [str(n) for n in allnets]
     write_ruleset(GEOIP_JSON, {"version": version, "rules": [{"ip_cidr": cidrs}]})
     print(f"wrote {GEOIP_JSON}: {len(v4)} v4 + {len(v6)} v6 = {len(cidrs)} ip_cidr (version {version})")
+    dat_cidrs = [(n.network_address.packed, n.prefixlen) for n in allnets]
+    write_dat(GEOIP_DAT, encode_geoip_dat(GEOIP_TAG, dat_cidrs))
+    print(f"wrote {GEOIP_DAT}: {len(dat_cidrs)} CIDRs (dae, tag '{GEOIP_TAG}')")
 
 
 def main():
